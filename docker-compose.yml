@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  solar-quote-server:
+    build: .
+    container_name: solar-quote-server
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    volumes:
+      - ./generated-docx:/app/generated-docx
+      - ./output:/app/output
+    restart: unless-stopped
+
