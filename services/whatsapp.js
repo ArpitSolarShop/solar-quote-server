@@ -24,7 +24,8 @@ async function sendWhatsAppMessage(phone, pdfUrl) {
     console.log('Sending WhatsApp message to:', formattedPhone, 'from:', senderPhone);
     console.log('Using API key:', apiKey.substring(0, 10) + '...'); // Log partial key for debugging
 
-    const templateName = 'arpit_solar_shop_quotation_document';
+    // const templateName = 'arpit_solar_shop_quotation_document';
+     const templateName = 'quotation_document';
     const filename = pdfUrl.split('/').pop();
 
     const payload = {
