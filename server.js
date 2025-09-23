@@ -245,8 +245,6 @@
 
 
 
-
-
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
@@ -408,9 +406,9 @@ app.post('/generate-quote', async (req, res) => {
 
       // Reverse-calculate base_price (exclusive of GST) and gst_amount
       if (totalPriceNum > 0) {
-        // total_price = base_price + (base_price * 0.05) => total_price = base_price * 1.05
-        // Therefore, base_price = total_price / 1.05
-        const basePriceNum = totalPriceNum / 1.05;
+        // total_price = base_price + (base_price * 0.089) => total_price = base_price * 1.089
+        // Therefore, base_price = total_price / 1.089
+        const basePriceNum = totalPriceNum / 1.089;
         const gstAmount = totalPriceNum - basePriceNum; // GST = total_price - base_price
         tempVars.base_price = Math.round(basePriceNum);
         tempVars.gst_amount = Math.round(gstAmount);
