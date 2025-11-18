@@ -1237,6 +1237,268 @@
 
 
 
+// const express = require('express');
+// const cors = require('cors');
+// const bodyParser = require('body-parser');
+// const path = require('path');
+// const fs = require('fs').promises;
+// require('dotenv').config();
+
+// const {
+//   fetchClosestRow,
+//   fetchFirstRow,
+//   fetchAllRows,
+//   fetchConfig,
+//   uploadToBucket,
+//   insertQuoteRequest
+// } = require('./services/supabase');
+// const { fillDocTemplate } = require('./utils/docGenerator');
+// const { convertDocxToPdf } = require('./services/libreoffice');
+// const { sendWhatsAppMessage } = require('./services/whatsapp');
+
+// const app = express();
+// app.use(cors());
+// app.use(bodyParser.json());
+// app.use(bodyParser.urlencoded({ extended: true }));
+
+// // Health check
+// app.get('/', (req, res) => {
+//   res.send('✅ Solar Quote Server is running');
+// });
+
+// app.post('/generate-quote', async (req, res) => {
+//   try {
+//     console.log('📥 Received form data:', req.body);
+
+//     const formData = req.body;
+//     const { product_category, power_demand_kw, phone, source, metadata, phase } = formData;
+//     let templateFile;
+//     let tempVars = { ...formData };
+
+//     // Add current date and time (India timezone)
+//     const generationDate = new Date().toLocaleString('en-IN', {
+//       timeZone: 'Asia/Kolkata',
+//       year: 'numeric', month: 'long', day: 'numeric',
+//       hour: '2-digit', minute: '2-digit', hour12: true
+//     });
+//     tempVars.quote_date = generationDate;
+//     console.log('📅 Generated quote on:', tempVars.quote_date);
+
+//     // -----------------------------
+//     // 1️⃣ Calculator Quote Form flow
+//     // -----------------------------
+//     if (source === 'Calculator Quote Form') {
+//       console.log('✅ Detected Calculator Quote Form submission.');
+
+//       if (!metadata) throw new Error('Calculator form submission is missing metadata.');
+
+//       tempVars.system_size = parseFloat(power_demand_kw).toFixed(2);
+//       tempVars.number_of_modules = metadata.panel_config ? metadata.panel_config.split(' ')[0] : 'N/A';
+//       tempVars.inverter_capacity = metadata.inverter_size_kw;
+//       tempVars.phase = formData.customer_type === 'commercial' ? 'Three' : 'Single';
+
+//       // Parse and round prices to integers (whole rupees)
+//       const basePriceNum = parseFloat(metadata.base_price);
+//       const gstAmountNum = parseFloat(metadata.gst_amount);
+//       const totalPriceNum = parseFloat(metadata.estimated_price);
+//       const pricePerWattNum = parseFloat(metadata.price_per_watt);
+
+//       tempVars.base_price = Math.round(basePriceNum).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+//       tempVars.gst_amount = Math.round(gstAmountNum).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+//       tempVars.total_price = Math.round(totalPriceNum).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+//       tempVars.price_per_kwp = pricePerWattNum.toFixed(2); // Keep price per watt to 2 decimals
+
+//       // Choose template
+//       templateFile = Number(power_demand_kw) <= 13.8
+//         ? path.join(__dirname, 'templates', 'reliance.docx')
+//         : path.join(__dirname, 'templates', 'reliance_industry.docx');
+
+//       const config = await fetchConfig('reliance_system_config');
+//       tempVars.module_wattage = config.PRODUCT_DESCRIPTION || config.product_description || 'N/A';
+//       tempVars.scope_of_work = config.WORK_SCOPE || config.work_scope || '';
+//       const dcCable = await fetchFirstRow('reliance_dc_cable_data');
+//       tempVars.dc_cable_per_meter = dcCable ? dcCable.price : 'N/A';
+//       const kitItems = await fetchAllRows('reliance_kit_items');
+//       tempVars.kit_items = kitItems.map(item => `${item.item}: ${item.description}`).join(', ');
+//     }
+
+//     // -----------------------------
+//     // 2️⃣ Reliance legacy flow
+//     // -----------------------------
+//     else if (product_category === 'Reliance') {
+//       console.log('Legacy Reliance form detected...');
+//       let systemData, basePriceNum;
+
+//       if (Number(power_demand_kw) <= 13.8) {
+//         systemData = await fetchClosestRow('reliance_grid_tie_systems', power_demand_kw, 'system_size');
+//         if (!systemData) throw new Error('No matching data in reliance_grid_tie_systems');
+//         tempVars.system_size = systemData.system_size;
+//         tempVars.number_of_modules = systemData.no_of_modules;
+//         tempVars.inverter_capacity = systemData.inverter_capacity;
+//         tempVars.phase = systemData.phase ?? tempVars.phase;
+//         tempVars.price_per_kwp = systemData.price_per_watt ?? systemData.hdg_elevated_with_gst ?? 'N/A'; // Corrected: Use per kWp (inclusive if GST field)
+//         basePriceNum = systemData.total_price ?? systemData.hdg_elevated_price ?? 0; // Assumes base (exclusive)
+//         templateFile = path.join(__dirname, 'templates', 'reliance.docx');
+//       } else {
+//         systemData = await fetchClosestRow('reliance_large_systems', power_demand_kw, 'system_size_kw');
+//         if (!systemData) throw new Error('No matching data in reliance_large_systems');
+//         tempVars.system_size = systemData.system_size_kw;
+//         tempVars.number_of_modules = systemData.no_of_modules;
+//         tempVars.inverter_capacity = systemData.inverter_capacity;
+//         tempVars.phase = systemData.phase ?? tempVars.phase;
+//         templateFile = path.join(__dirname, 'templates', 'reliance_industry.docx');
+
+//         if (formData.mounting_type === 'Tin Shed') {
+//           tempVars.price_per_kwp = systemData.short_rail_tin_shed_price_per_watt; // Corrected: Use per kWp
+//           basePriceNum = systemData.short_rail_tin_shed_price; // Assumes base (exclusive)
+//         } else if (formData.mounting_type === 'RCC Elevated') {
+//           tempVars.price_per_kwp = systemData.hdg_elevated_rcc_price_per_watt; // Corrected: Use per kWp
+//           basePriceNum = systemData.hdg_elevated_rcc_price; // Assumes base (exclusive)
+//         } else if (formData.mounting_type === 'Pre GI MMS') {
+//           tempVars.price_per_kwp = systemData.pre_gi_mms_price_per_watt; // Corrected: Use per kWp
+//           basePriceNum = systemData.pre_gi_mms_price; // Assumes base (exclusive)
+//         } else if (formData.mounting_type === 'Without MMS') {
+//           tempVars.price_per_kwp = systemData.price_without_mms_price_per_watt; // Corrected: Use per kWp
+//           basePriceNum = systemData.price_without_mms_price; // Assumes base (exclusive)
+//         } else {
+//           tempVars.price_per_kwp = 'N/A';
+//           basePriceNum = 0;
+//         }
+//       }
+
+//       // GST calc: Forward from base (exclusive) → total (inclusive) @ 8.9%
+//       if (basePriceNum > 0) {
+//         const gstAmount = Math.round(basePriceNum * 0.089); // Precise rounding
+//         const totalPrice = Math.round(basePriceNum + gstAmount);
+//         tempVars.base_price = Math.round(basePriceNum).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+//         tempVars.gst_amount = gstAmount.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+//         tempVars.total_price = totalPrice.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+//       } else {
+//         tempVars.base_price = tempVars.gst_amount = tempVars.total_price = 'N/A';
+//       }
+
+//       const config = await fetchConfig('reliance_system_config');
+//       tempVars.module_wattage = config.PRODUCT_DESCRIPTION || config.product_description || 'N/A';
+//       tempVars.scope_of_work = config.WORK_SCOPE || config.work_scope || '';
+//       const dcCable = await fetchFirstRow('reliance_dc_cable_data');
+//       tempVars.dc_cable_per_meter = dcCable ? dcCable.price : 'N/A';
+//       const kitItems = await fetchAllRows('reliance_kit_items');
+//       tempVars.kit_items = kitItems.map(item => `${item.item}: ${item.description}`).join(', ');
+//     }
+
+//     // -----------------------------
+//     // 3️⃣ Shakti & Tata flows
+//     // -----------------------------
+//     else if (product_category === 'Shakti' || product_category === 'Tata') {
+//       const tableName = product_category === 'Shakti'
+//         ? 'shakti_grid_tie_systems'
+//         : 'tata_grid_tie_systems';
+
+//       // Tata requires phase
+//       if (product_category === 'Tata' && !phase) {
+//         throw new Error('Phase is required for Tata systems.');
+//       }
+
+//       console.log(`🔍 Searching in ${tableName} for size: ${power_demand_kw}, phase: ${phase}`);
+//       const allSystems = await fetchAllRows(tableName);
+//       let systemData = allSystems.find(sys => sys.system_size == power_demand_kw && (!phase || sys.phase === phase));
+
+//       if (!systemData) {
+//         console.log(`🟡 No exact match. Falling back to closest size.`);
+//         systemData = await fetchClosestRow(tableName, power_demand_kw, 'system_size');
+//       }
+
+//       if (!systemData) throw new Error(`No matching data found in ${tableName}`);
+//       console.log('✅ Found system data:', systemData);
+
+//       // totalPriceNum is inclusive (e.g., pre_gi_elevated_price or total_price includes GST)
+//       const totalPriceNum = parseFloat(systemData.total_price ?? systemData.pre_gi_elevated_price ?? 0);
+//       if (totalPriceNum > 0) {
+//         const basePriceNum = Math.round(totalPriceNum / 1.089); // Precise: Back out base from inclusive
+//         const gstAmount = Math.round(totalPriceNum - basePriceNum); // Ensures gst + base = total (avoids floating-point drift)
+//         tempVars.base_price = basePriceNum.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+//         tempVars.gst_amount = gstAmount.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+//         tempVars.total_price = Math.round(totalPriceNum).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+//       } else {
+//         tempVars.base_price = tempVars.gst_amount = tempVars.total_price = 'N/A';
+//       }
+
+//       tempVars.system_size = systemData.system_size;
+//       tempVars.number_of_modules = systemData.no_of_modules;
+//       tempVars.inverter_capacity = systemData.inverter_capacity;
+//       tempVars.phase = systemData.phase;
+
+//       // price_per_kwp is inclusive per kWp (e.g., pre_gi_elevated_with_gst or price_per_kwp)
+//       if (product_category === 'Tata') {
+//         tempVars.price_per_kwp = systemData.price_per_kwp ?? 'N/A';
+//       } else {
+//         tempVars.price_per_kwp = systemData.pre_gi_elevated_with_gst ?? 'N/A'; // Corrected: Inclusive per kWp
+//       }
+
+//       const config = await fetchConfig(`${product_category.toLowerCase()}_config`);
+//       tempVars.module_wattage =
+//         config.product_description || config.PRODUCT_DESCRIPTION || 'N/A';
+
+//       templateFile = path.join(__dirname, 'templates', `${product_category.toLowerCase()}.docx`);
+//     }
+
+//     else {
+//       return res.status(400).json({ error: 'Invalid product_category or source' });
+//     }
+
+//     // Ensure template exists
+//     try {
+//       await fs.access(templateFile);
+//     } catch {
+//       throw new Error(`Template file missing: ${templateFile}`);
+//     }
+
+//     // Early formatting for price_per_kwp if numeric (for template consistency)
+//     if (typeof tempVars.price_per_kwp === 'number') {
+//       tempVars.price_per_kwp = tempVars.price_per_kwp.toLocaleString('en-IN', { maximumFractionDigits: 2 });
+//     }
+
+//     // Store form data
+//     try {
+//       await insertQuoteRequest(formData);
+//       console.log('✅ Form data stored in Supabase');
+//     } catch (dbErr) {
+//       console.error('❌ Failed to store form data', dbErr);
+//     }
+
+//     // Generate DOCX → PDF → upload → WhatsApp
+//     console.log("🧾 Final tempVars:", JSON.stringify(tempVars, null, 2));
+//     const filledDocxPath = await fillDocTemplate(templateFile, tempVars);
+//     const pdfPath = await convertDocxToPdf(filledDocxPath);
+//     const pdfUrl = await uploadToBucket(pdfPath);
+//     await sendWhatsAppMessage(phone, pdfUrl);
+
+//     res.json({ success: true, pdfUrl });
+//   } catch (err) {
+//     console.error('❌ Error generating quote:', err);
+//     res.status(500).json({ error: err.message || 'Internal server error' });
+//   }
+// });
+
+// const PORT = process.env.PORT || 3000;
+// app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// ==== CODE 2 ==== (Safe enhanced version of Code 1)
+
 const express = require('express');
 const cors = require('cors');
 const bodyParser = require('body-parser');
@@ -1297,7 +1559,6 @@ app.post('/generate-quote', async (req, res) => {
       tempVars.inverter_capacity = metadata.inverter_size_kw;
       tempVars.phase = formData.customer_type === 'commercial' ? 'Three' : 'Single';
 
-      // Parse and round prices to integers (whole rupees)
       const basePriceNum = parseFloat(metadata.base_price);
       const gstAmountNum = parseFloat(metadata.gst_amount);
       const totalPriceNum = parseFloat(metadata.estimated_price);
@@ -1306,9 +1567,8 @@ app.post('/generate-quote', async (req, res) => {
       tempVars.base_price = Math.round(basePriceNum).toLocaleString('en-IN', { maximumFractionDigits: 0 });
       tempVars.gst_amount = Math.round(gstAmountNum).toLocaleString('en-IN', { maximumFractionDigits: 0 });
       tempVars.total_price = Math.round(totalPriceNum).toLocaleString('en-IN', { maximumFractionDigits: 0 });
-      tempVars.price_per_kwp = pricePerWattNum.toFixed(2); // Keep price per watt to 2 decimals
+      tempVars.price_per_kwp = pricePerWattNum.toFixed(2);
 
-      // Choose template
       templateFile = Number(power_demand_kw) <= 13.8
         ? path.join(__dirname, 'templates', 'reliance.docx')
         : path.join(__dirname, 'templates', 'reliance_industry.docx');
@@ -1336,8 +1596,8 @@ app.post('/generate-quote', async (req, res) => {
         tempVars.number_of_modules = systemData.no_of_modules;
         tempVars.inverter_capacity = systemData.inverter_capacity;
         tempVars.phase = systemData.phase ?? tempVars.phase;
-        tempVars.price_per_kwp = systemData.price_per_watt ?? systemData.hdg_elevated_with_gst ?? 'N/A'; // Corrected: Use per kWp (inclusive if GST field)
-        basePriceNum = systemData.total_price ?? systemData.hdg_elevated_price ?? 0; // Assumes base (exclusive)
+        tempVars.price_per_kwp = systemData.price_per_watt ?? systemData.hdg_elevated_with_gst ?? 'N/A';
+        basePriceNum = systemData.total_price ?? systemData.hdg_elevated_price ?? 0;
         templateFile = path.join(__dirname, 'templates', 'reliance.docx');
       } else {
         systemData = await fetchClosestRow('reliance_large_systems', power_demand_kw, 'system_size_kw');
@@ -1349,26 +1609,25 @@ app.post('/generate-quote', async (req, res) => {
         templateFile = path.join(__dirname, 'templates', 'reliance_industry.docx');
 
         if (formData.mounting_type === 'Tin Shed') {
-          tempVars.price_per_kwp = systemData.short_rail_tin_shed_price_per_watt; // Corrected: Use per kWp
-          basePriceNum = systemData.short_rail_tin_shed_price; // Assumes base (exclusive)
+          tempVars.price_per_kwp = systemData.short_rail_tin_shed_price_per_watt;
+          basePriceNum = systemData.short_rail_tin_shed_price;
         } else if (formData.mounting_type === 'RCC Elevated') {
-          tempVars.price_per_kwp = systemData.hdg_elevated_rcc_price_per_watt; // Corrected: Use per kWp
-          basePriceNum = systemData.hdg_elevated_rcc_price; // Assumes base (exclusive)
+          tempVars.price_per_kwp = systemData.hdg_elevated_rcc_price_per_watt;
+          basePriceNum = systemData.hdg_elevated_rcc_price;
         } else if (formData.mounting_type === 'Pre GI MMS') {
-          tempVars.price_per_kwp = systemData.pre_gi_mms_price_per_watt; // Corrected: Use per kWp
-          basePriceNum = systemData.pre_gi_mms_price; // Assumes base (exclusive)
+          tempVars.price_per_kwp = systemData.pre_gi_mms_price_per_watt;
+          basePriceNum = systemData.pre_gi_mms_price;
         } else if (formData.mounting_type === 'Without MMS') {
-          tempVars.price_per_kwp = systemData.price_without_mms_price_per_watt; // Corrected: Use per kWp
-          basePriceNum = systemData.price_without_mms_price; // Assumes base (exclusive)
+          tempVars.price_per_kwp = systemData.price_without_mms_price_per_watt;
+          basePriceNum = systemData.price_without_mms_price;
         } else {
           tempVars.price_per_kwp = 'N/A';
           basePriceNum = 0;
         }
       }
 
-      // GST calc: Forward from base (exclusive) → total (inclusive) @ 8.9%
       if (basePriceNum > 0) {
-        const gstAmount = Math.round(basePriceNum * 0.089); // Precise rounding
+        const gstAmount = Math.round(basePriceNum * 0.089);
         const totalPrice = Math.round(basePriceNum + gstAmount);
         tempVars.base_price = Math.round(basePriceNum).toLocaleString('en-IN', { maximumFractionDigits: 0 });
         tempVars.gst_amount = gstAmount.toLocaleString('en-IN', { maximumFractionDigits: 0 });
@@ -1394,7 +1653,6 @@ app.post('/generate-quote', async (req, res) => {
         ? 'shakti_grid_tie_systems'
         : 'tata_grid_tie_systems';
 
-      // Tata requires phase
       if (product_category === 'Tata' && !phase) {
         throw new Error('Phase is required for Tata systems.');
       }
@@ -1411,11 +1669,10 @@ app.post('/generate-quote', async (req, res) => {
       if (!systemData) throw new Error(`No matching data found in ${tableName}`);
       console.log('✅ Found system data:', systemData);
 
-      // totalPriceNum is inclusive (e.g., pre_gi_elevated_price or total_price includes GST)
       const totalPriceNum = parseFloat(systemData.total_price ?? systemData.pre_gi_elevated_price ?? 0);
       if (totalPriceNum > 0) {
-        const basePriceNum = Math.round(totalPriceNum / 1.089); // Precise: Back out base from inclusive
-        const gstAmount = Math.round(totalPriceNum - basePriceNum); // Ensures gst + base = total (avoids floating-point drift)
+        const basePriceNum = Math.round(totalPriceNum / 1.089);
+        const gstAmount = Math.round(totalPriceNum - basePriceNum);
         tempVars.base_price = basePriceNum.toLocaleString('en-IN', { maximumFractionDigits: 0 });
         tempVars.gst_amount = gstAmount.toLocaleString('en-IN', { maximumFractionDigits: 0 });
         tempVars.total_price = Math.round(totalPriceNum).toLocaleString('en-IN', { maximumFractionDigits: 0 });
@@ -1428,16 +1685,14 @@ app.post('/generate-quote', async (req, res) => {
       tempVars.inverter_capacity = systemData.inverter_capacity;
       tempVars.phase = systemData.phase;
 
-      // price_per_kwp is inclusive per kWp (e.g., pre_gi_elevated_with_gst or price_per_kwp)
       if (product_category === 'Tata') {
         tempVars.price_per_kwp = systemData.price_per_kwp ?? 'N/A';
       } else {
-        tempVars.price_per_kwp = systemData.pre_gi_elevated_with_gst ?? 'N/A'; // Corrected: Inclusive per kWp
+        tempVars.price_per_kwp = systemData.pre_gi_elevated_with_gst ?? 'N/A';
       }
 
       const config = await fetchConfig(`${product_category.toLowerCase()}_config`);
-      tempVars.module_wattage =
-        config.product_description || config.PRODUCT_DESCRIPTION || 'N/A';
+      tempVars.module_wattage = config.product_description || config.PRODUCT_DESCRIPTION || 'N/A';
 
       templateFile = path.join(__dirname, 'templates', `${product_category.toLowerCase()}.docx`);
     }
@@ -1453,7 +1708,6 @@ app.post('/generate-quote', async (req, res) => {
       throw new Error(`Template file missing: ${templateFile}`);
     }
 
-    // Early formatting for price_per_kwp if numeric (for template consistency)
     if (typeof tempVars.price_per_kwp === 'number') {
       tempVars.price_per_kwp = tempVars.price_per_kwp.toLocaleString('en-IN', { maximumFractionDigits: 2 });
     }
@@ -1466,12 +1720,36 @@ app.post('/generate-quote', async (req, res) => {
       console.error('❌ Failed to store form data', dbErr);
     }
 
-    // Generate DOCX → PDF → upload → WhatsApp
+    // Generate DOCX → PDF → upload
     console.log("🧾 Final tempVars:", JSON.stringify(tempVars, null, 2));
     const filledDocxPath = await fillDocTemplate(templateFile, tempVars);
     const pdfPath = await convertDocxToPdf(filledDocxPath);
     const pdfUrl = await uploadToBucket(pdfPath);
+
+    // === SEND TO CUSTOMER (existing behavior - unchanged) ===
     await sendWhatsAppMessage(phone, pdfUrl);
+    console.log(`✅ Quotation sent to customer: ${phone}`);
+
+    // === NEW: SEND TO REFERRAL IF referral_name AND referral_phone EXIST ===
+    if (formData.referral_name && formData.referral_phone) {
+      const referralPhone = formData.referral_phone.trim();
+      const referralName = formData.referral_name.trim();
+
+      // Basic Indian phone number sanity (10 digits or +91 prefix)
+      const cleanPhone = referralPhone.replace(/[^\d+]/g, '');
+      if (/^(?:\+91|91)?[6-9]\d{9}$/.test(cleanPhone)) {
+        try {
+          const message = `Hello ${referralName}!\n\nYour friend ${formData.name || 'a customer'} just received a solar quotation thanks to your referral! 🎉\n\nHere is the copy of the quote:\n${pdfUrl}\n\nThank you for trusting us!\nTeam Solar`;
+          await sendWhatsAppMessage(referralPhone, pdfUrl, message);
+          console.log(`✅ Referral copy sent to ${referralName} (${referralPhone})`);
+        } catch (err) {
+          console.error(`❌ Failed to send to referral ${referralPhone}:`, err.message);
+          // Not throwing — we don't want to break the main flow
+        }
+      } else {
+        console.warn(`⚠️ Invalid referral phone number skipped: ${referralPhone}`);
+      }
+    }
 
     res.json({ success: true, pdfUrl });
   } catch (err) {
