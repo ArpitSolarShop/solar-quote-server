@@ -2290,6 +2290,9 @@ app.post('/generate-quote', async (req, res) => {
       // [All Reliance logic preserved exactly as in Code 1]
       let systemData, basePriceNum;
 
+      let isReverseGst = false;
+      let totalPriceForReverse = 0;
+
       if (Number(power_demand_kw) <= 13.8) {
         systemData = await fetchClosestRow('reliance_grid_tie_systems', power_demand_kw, 'system_size');
         if (!systemData) throw new Error('No matching data in reliance_grid_tie_systems');
@@ -2298,7 +2301,10 @@ app.post('/generate-quote', async (req, res) => {
         tempVars.inverter_capacity = systemData.inverter_capacity;
         tempVars.phase = systemData.phase ?? tempVars.phase;
         tempVars.price_per_kwp = systemData.price_per_watt ?? systemData.hdg_elevated_with_gst ?? 'N/A';
-        basePriceNum = systemData.total_price ?? systemData.hdg_elevated_price ?? 0;
+        // REVERSE GST: Fetched price is TOTAL PRICE
+        totalPriceForReverse = systemData.total_price ?? systemData.hdg_elevated_price ?? 0;
+        isReverseGst = true;
+
         templateFile = path.join(__dirname, 'templates', 'reliance.docx');
       } else {
         systemData = await fetchClosestRow('reliance_large_systems', power_demand_kw, 'system_size_kw');
@@ -2327,12 +2333,25 @@ app.post('/generate-quote', async (req, res) => {
         }
       }
 
-      if (basePriceNum > 0) {
-        const gstAmount = Math.round(basePriceNum * 0.089);
-        const totalPrice = Math.round(basePriceNum + gstAmount);
-        tempVars.base_price = Math.round(basePriceNum).toLocaleString('en-IN', { maximumFractionDigits: 0 });
-        tempVars.gst_amount = gstAmount.toLocaleString('en-IN', { maximumFractionDigits: 0 });
-        tempVars.total_price = totalPrice.toLocaleString('en-IN', { maximumFractionDigits: 0 });
+      // --- GST CALCULATION ---
+      if (isReverseGst && totalPriceForReverse > 0) {
+        // Reverse Calculation: Total / 1.089 = Base
+        const total = parseFloat(totalPriceForReverse);
+        const base = total / 1.089;
+        const gst = total - base;
+
+        tempVars.base_price = Math.round(base).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+        tempVars.gst_amount = Math.round(gst).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+        tempVars.total_price = Math.round(total).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+      } else if (!isReverseGst && basePriceNum > 0) {
+        // Forward Calculation: Base + (Base * 0.089) = Total
+        const base = parseFloat(basePriceNum);
+        const gst = base * 0.089;
+        const total = base + gst;
+
+        tempVars.base_price = Math.round(base).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+        tempVars.gst_amount = Math.round(gst).toLocaleString('en-IN', { maximumFractionDigits: 0 });
+        tempVars.total_price = Math.round(total).toLocaleString('en-IN', { maximumFractionDigits: 0 });
       } else {
         tempVars.base_price = tempVars.gst_amount = tempVars.total_price = 'N/A';
       }
@@ -2382,7 +2401,7 @@ app.post('/generate-quote', async (req, res) => {
       tempVars.inverter_capacity = systemData.inverter_capacity;
       tempVars.phase = systemData.phase;
 
-      tempVars.price_per_kwp = product_category === 'Tata' 
+      tempVars.price_per_kwp = product_category === 'Tata'
         ? (systemData.price_per_kwp ?? 'N/A')
         : (systemData.pre_gi_elevated_with_gst ?? 'N/A');
 
